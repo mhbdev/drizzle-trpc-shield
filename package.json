@@ -32,9 +32,10 @@
     "dev": "tsup --watch",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:declaration": "tsc -p tsconfig.declaration-tests.json",
     "test:type": "tsc -p tsconfig.type-tests.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "check": "pnpm lint && pnpm typecheck && pnpm test:type && pnpm test && pnpm build",
+    "check": "pnpm lint && pnpm typecheck && pnpm test:type && pnpm test:declaration && pnpm test && pnpm build",
     "publint": "publint",
     "attw": "attw --pack ."
   },

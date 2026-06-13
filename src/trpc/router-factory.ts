@@ -2,9 +2,9 @@ import {
   initTRPC,
   type AnyMutationProcedure,
   type AnyQueryProcedure,
+  type AnyRouter,
   type AnyTRPCRootTypes,
-  type TRPCDecorateCreateRouterOptions,
-  type TRPCBuiltRouter,
+  type TRPCRouterRecord,
   type TRPCRouterBuilder,
 } from "@trpc/server";
 
@@ -39,7 +39,16 @@ type OperationEnabled<TResource extends AnyResource, TOperation extends Operatio
 
 type EmptyRecord = Record<never, never>;
 
-type ResourceRouterInput<TResource extends AnyResource> = {
+type PublicRouterDef<TRecord extends TRPCRouterRecord> = Omit<AnyRouter["_def"], "procedures" | "record"> & {
+  procedures: TRecord;
+  record: TRecord;
+};
+
+export type PublicRouter<TRecord extends TRPCRouterRecord> = Omit<AnyRouter, "_def"> & {
+  _def: PublicRouterDef<TRecord>;
+} & TRecord;
+
+type ResourceRouterRecord<TResource extends AnyResource> = {
   [TOperation in EnabledOperations<TResource>]: OperationProcedure<TOperation>;
 } & (OperationEnabled<TResource, "list"> extends true ? { findMany: AnyQueryProcedure } : EmptyRecord) & (OperationEnabled<
   TResource,
@@ -48,19 +57,17 @@ type ResourceRouterInput<TResource extends AnyResource> = {
   ? { findById: AnyQueryProcedure }
   : EmptyRecord);
 
-export type ResourceRouter<TResource extends AnyResource> = TRPCBuiltRouter<
-  AnyTRPCRootTypes,
-  TRPCDecorateCreateRouterOptions<ResourceRouterInput<TResource>>
->;
+export type ResourceRouter<TResource extends AnyResource> = PublicRouter<ResourceRouterRecord<TResource>>;
 
 type RootRouterInput<TResources extends Record<string, AnyResource>> = {
   [TName in keyof TResources]: ResourceRouter<TResources[TName]>;
 };
 
-export type RootRouter<TResources extends Record<string, AnyResource>> = TRPCBuiltRouter<
-  AnyTRPCRootTypes,
-  TRPCDecorateCreateRouterOptions<RootRouterInput<TResources>>
->;
+type RootRouterRecord<TResources extends Record<string, AnyResource>> = {
+  [TName in keyof TResources]: ResourceRouterRecord<TResources[TName]>;
+};
+
+export type RootRouter<TResources extends Record<string, AnyResource>> = PublicRouter<RootRouterRecord<TResources>>;
 
 const DEFAULT_OPERATIONS = [
   "list",
@@ -177,7 +184,7 @@ export function createResourceRouter<TContext extends object, const TResource ex
     procedures.findById = procedures.get as AnyQueryProcedure;
   }
 
-  return args.t.router(procedures as ResourceRouterInput<TResource>);
+  return args.t.router(procedures as ResourceRouterRecord<TResource>) as ResourceRouter<TResource>;
 }
 
 export function createRootRouter<TContext extends object, const TResources extends Record<string, AnyResource>>(args: {
@@ -200,5 +207,5 @@ export function createRootRouter<TContext extends object, const TResources exten
     });
   }
 
-  return args.t.router(routers as RootRouterInput<TResources>);
+  return args.t.router(routers as RootRouterInput<TResources>) as RootRouter<TResources>;
 }

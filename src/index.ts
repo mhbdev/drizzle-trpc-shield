@@ -98,3 +98,7 @@ export {
   createZodValidationAdapter,
   type ValidationAdapter,
 } from "./validation/zod.js";
+export {
+  type ResourceRouter,
+  type RootRouter,
+} from "./trpc/router-factory.js";
