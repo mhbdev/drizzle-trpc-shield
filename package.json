@@ -4,7 +4,7 @@
   "description": "A secure, type-safe tRPC API layer generated from Drizzle ORM schemas.",
   "type": "module",
   "license": "MIT",
-  "author": "",
+  "author": "mhbdev",
   "sideEffects": false,
   "files": [
     "dist",
