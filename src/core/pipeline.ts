@@ -2,7 +2,7 @@ import type { SQL, Table as AnyTable } from "drizzle-orm";
 
 import type { ShieldConfig } from "./create-shield.js";
 import { getOperationConfig, type AnyResource } from "./resource.js";
-import type { OperationName } from "./types.js";
+import type { MaybePromise, OperationName } from "./types.js";
 import { assertPolicyDecision, collectPolicyRules, type CollectedPolicyRule } from "../policy/policy.js";
 import type { OperationLifecycle, OperationHookArgs, ShieldPlugin, ShieldPluginHookArgs } from "../plugins/plugin.js";
 
@@ -104,12 +104,32 @@ export async function runPluginHook<TContext extends object>(
   }
 }
 
+export async function runTransformHook<TContext extends object>(
+  plugins: readonly ShieldPlugin<TContext>[],
+  hook: "beforeValidate" | "afterValidate" | "beforeQuery" | "afterQuery" | "beforeReturn",
+  args: ShieldPluginHookArgs<TContext>,
+  valueKey: "input" | "result",
+  value: unknown,
+): Promise<unknown> {
+  let current = value;
+  for (const plugin of plugins) {
+    const fn = plugin.hooks?.[hook] as ((args: ShieldPluginHookArgs<TContext>) => MaybePromise<unknown>) | undefined;
+    const next = await fn?.({ ...args, [valueKey]: current });
+    if (next !== undefined) {
+      current = next;
+    }
+  }
+  return current;
+}
+
 const OPERATION_HOOK_NAMES = {
   list: { before: "beforeList", after: "afterList" },
   get: { before: "beforeGet", after: "afterGet" },
   create: { before: "beforeCreate", after: "afterCreate" },
+  createMany: { before: "beforeCreateMany", after: "afterCreateMany" },
   update: { before: "beforeUpdate", after: "afterUpdate" },
   delete: { before: "beforeDelete", after: "afterDelete" },
+  deleteMany: { before: "beforeDeleteMany", after: "afterDeleteMany" },
 } as const;
 
 export function getOperationHookName<TOperation extends OperationLifecycle>(

@@ -64,22 +64,35 @@ export function resolveColumnNames(resource: AnyResource): string[] {
   return Object.keys(getColumns(resource.table));
 }
 
+function selectedColumnNames(resource: AnyResource): string[] {
+  const columns = resolveColumnNames(resource);
+  const selected = resource.options.fields?.select?.map(String);
+  return selected ? selected.filter((name) => columns.includes(name)) : columns;
+}
+
 export function visibleColumnNames(resource: AnyResource): string[] {
   const hidden = new Set((resource.options.fields?.hidden ?? []).map(String));
-  return resolveColumnNames(resource).filter((name) => !hidden.has(name));
+  return selectedColumnNames(resource).filter((name) => {
+    const columnPolicy = resource.options.columnPolicies?.[name];
+    return !hidden.has(name) && columnPolicy?.readable !== false;
+  });
 }
 
 export function writableColumnNames(resource: AnyResource): string[] {
   const columns = resolveColumnNames(resource);
   const explicit = resource.options.fields?.writable?.map(String);
+  const isWritableByPolicy = (name: string) => {
+    const columnPolicy = resource.options.columnPolicies?.[name];
+    return columnPolicy?.readable !== false && columnPolicy?.writable !== false;
+  };
 
   if (explicit) {
-    return explicit.filter((name) => columns.includes(name));
+    return explicit.filter((name) => columns.includes(name) && isWritableByPolicy(name));
   }
 
   const hidden = new Set((resource.options.fields?.hidden ?? []).map(String));
   const readonly = new Set((resource.options.fields?.readonly ?? []).map(String));
-  return columns.filter((name) => !hidden.has(name) && !readonly.has(name));
+  return columns.filter((name) => !hidden.has(name) && !readonly.has(name) && isWritableByPolicy(name));
 }
 
 export function visibleSelection(resource: AnyResource): ColumnMap {
@@ -93,7 +106,38 @@ export function pickWritableData(resource: AnyResource, data: Record<string, unk
   return Object.fromEntries(Object.entries(data).filter(([name]) => writable.has(name)));
 }
 
+export function pickWritableDataWithInjectedFields(
+  resource: AnyResource,
+  originalData: Record<string, unknown>,
+  runtimeData: Record<string, unknown>,
+): Record<string, unknown> {
+  const columns = new Set(resolveColumnNames(resource));
+  const originalKeys = new Set(Object.keys(originalData));
+  const data = pickWritableData(resource, runtimeData);
+
+  for (const [name, value] of Object.entries(runtimeData)) {
+    if (!originalKeys.has(name) && columns.has(name)) {
+      data[name] = value;
+    }
+  }
+
+  return data;
+}
+
 export function maskRow(resource: AnyResource, row: Record<string, unknown>): Record<string, unknown> {
   const visible = new Set(visibleColumnNames(resource));
-  return Object.fromEntries(Object.entries(row).filter(([name]) => visible.has(name)));
+  const output: Record<string, unknown> = {};
+
+  for (const [name, value] of Object.entries(row)) {
+    if (!visible.has(name)) {
+      continue;
+    }
+
+    const transform = resource.options.transforms?.[name] as
+      | ((value: unknown, row: Record<string, unknown>) => unknown)
+      | undefined;
+    output[name] = transform ? transform(value, row) : value;
+  }
+
+  return output;
 }

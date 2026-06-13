@@ -3,6 +3,7 @@ import {
   type AnyMutationProcedure,
   type AnyQueryProcedure,
   type AnyTRPCRootTypes,
+  type TRPCDecorateCreateRouterOptions,
   type TRPCBuiltRouter,
   type TRPCRouterBuilder,
 } from "@trpc/server";
@@ -13,7 +14,9 @@ import { getOperationConfig, isOperationEnabled, type AnyResource } from "../cor
 import type { EnabledOperations, OperationName } from "../core/types.js";
 import {
   executeCreate,
+  executeCreateMany,
   executeDelete,
+  executeDeleteMany,
   executeGet,
   executeList,
   executeUpdate,
@@ -30,29 +33,44 @@ type OperationProcedure<TOperation extends OperationName> = TOperation extends "
   ? AnyQueryProcedure
   : AnyMutationProcedure;
 
-type ResourceRouterRecord<TResource extends AnyResource> = {
+type OperationEnabled<TResource extends AnyResource, TOperation extends OperationName> = TOperation extends EnabledOperations<TResource>
+  ? true
+  : false;
+
+type EmptyRecord = Record<never, never>;
+
+type ResourceRouterInput<TResource extends AnyResource> = {
   [TOperation in EnabledOperations<TResource>]: OperationProcedure<TOperation>;
-};
+} & (OperationEnabled<TResource, "list"> extends true ? { findMany: AnyQueryProcedure } : EmptyRecord) & (OperationEnabled<
+  TResource,
+  "get"
+> extends true
+  ? { findById: AnyQueryProcedure }
+  : EmptyRecord);
 
 export type ResourceRouter<TResource extends AnyResource> = TRPCBuiltRouter<
   AnyTRPCRootTypes,
-  ResourceRouterRecord<TResource>
+  TRPCDecorateCreateRouterOptions<ResourceRouterInput<TResource>>
 >;
 
 type RootRouterInput<TResources extends Record<string, AnyResource>> = {
   [TName in keyof TResources]: ResourceRouter<TResources[TName]>;
 };
 
-type RootRouterRecord<TResources extends Record<string, AnyResource>> = {
-  [TName in keyof TResources]: ResourceRouterRecord<TResources[TName]>;
-};
-
 export type RootRouter<TResources extends Record<string, AnyResource>> = TRPCBuiltRouter<
   AnyTRPCRootTypes,
-  RootRouterRecord<TResources>
+  TRPCDecorateCreateRouterOptions<RootRouterInput<TResources>>
 >;
 
-const DEFAULT_OPERATIONS = ["list", "get", "create", "update", "delete"] as const satisfies readonly OperationName[];
+const DEFAULT_OPERATIONS = [
+  "list",
+  "get",
+  "create",
+  "createMany",
+  "update",
+  "delete",
+  "deleteMany",
+] as const satisfies readonly OperationName[];
 
 function isQuery(operation: OperationName): boolean {
   return operation === "list" || operation === "get";
@@ -101,10 +119,14 @@ async function executeOperation<TContext extends object>(args: {
       return executeGet({ ...args, db: args.db as any });
     case "create":
       return executeCreate({ ...args, db: args.db as any });
+    case "createMany":
+      return executeCreateMany({ ...args, db: args.db as any });
     case "update":
       return executeUpdate({ ...args, db: args.db as any });
     case "delete":
       return executeDelete({ ...args, db: args.db as any });
+    case "deleteMany":
+      return executeDeleteMany({ ...args, db: args.db as any });
   }
 }
 
@@ -119,7 +141,8 @@ export function createResourceRouter<TContext extends object, const TResource ex
   resourceName: string;
   validation: ValidationAdapter;
 }): ResourceRouter<TResource> {
-  const procedures: Partial<Record<OperationName, AnyQueryProcedure | AnyMutationProcedure>> = {};
+  const procedures: Partial<Record<OperationName | "findMany" | "findById", AnyQueryProcedure | AnyMutationProcedure>> =
+    {};
 
   for (const operation of DEFAULT_OPERATIONS) {
     if (!isOperationEnabled(args.resource, operation)) {
@@ -147,7 +170,14 @@ export function createResourceRouter<TContext extends object, const TResource ex
     procedures[operation] = isQuery(operation) ? procedure.query(resolver) : procedure.mutation(resolver);
   }
 
-  return args.t.router(procedures as ResourceRouterRecord<TResource>);
+  if (procedures.list) {
+    procedures.findMany = procedures.list as AnyQueryProcedure;
+  }
+  if (procedures.get) {
+    procedures.findById = procedures.get as AnyQueryProcedure;
+  }
+
+  return args.t.router(procedures as ResourceRouterInput<TResource>);
 }
 
 export function createRootRouter<TContext extends object, const TResources extends Record<string, AnyResource>>(args: {

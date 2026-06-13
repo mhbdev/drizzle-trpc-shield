@@ -1,16 +1,23 @@
 # drizzle-trpc-shield
 
-Turn Drizzle ORM tables into secure, type-safe tRPC APIs with explicit policies, field controls, hooks, and plugin support.
+A plug-in layer that turns Drizzle ORM tables into secure, ready-to-use tRPC APIs automatically.
+
+`drizzle-trpc-shield` is built for teams that want generated CRUD without giving up explicit authorization, field-level security, lifecycle hooks, plugin extension points, or TypeScript inference.
 
 ## What it gives you
 
-- `defineTable` for wrapping a Drizzle table with API config
-- `createDbRouter` for the fastest path from table definitions to a tRPC router
-- `createShield` when you want the full API object and more control
-- `ApiContext` for a typed request context
-- `allow`, `deny`, and `policy` for composable authorization rules
-- `ShieldPlugin` for lifecycle hooks and extension points
-- automatic CRUD procedures: `list`, `get`, `create`, `update`, `delete`
+- `defineTable` to wrap a Drizzle table with resource-level API config
+- `defineResource` for a fluent, developer-friendly resource builder
+- `createShieldRouter` for a plug-and-play router from raw tables or resource definitions
+- `createDbRouter` for the direct table-map API
+- `createShield` when you want the full shield object, router map, resource map, and contract
+- `ApiContext` for typed request context flowing through policies, guards, hooks, and plugins
+- `allow`, `deny`, `policy`, and guard helpers for row-level access control
+- field visibility controls with `hidden`, `readonly`, `writable`, `select`, and `columnPolicies`
+- safe query controls for filterable columns, sortable columns, limits, offsets, and cursor pagination
+- generated procedures: `list`, `findMany`, `get`, `findById`, `create`, `createMany`, `update`, `delete`, and `deleteMany`
+- lifecycle hooks and plugins for auditing, transforms, tenant injection, custom behavior, and side effects
+- strict fail-closed defaults: enabled operations must have a global, resource, or operation policy
 
 ## Install
 
@@ -18,7 +25,9 @@ Turn Drizzle ORM tables into secure, type-safe tRPC APIs with explicit policies,
 pnpm add drizzle-trpc-shield @trpc/server drizzle-orm zod
 ```
 
-## Quick start
+The package is ESM-first, ships CommonJS output, and expects Node.js 20 or newer.
+
+## Quick Start
 
 ```ts
 import { initTRPC } from "@trpc/server";
@@ -39,26 +48,24 @@ type Context = ApiContext<{
 }>;
 
 const t = initTRPC.context<Context>().create();
-// db is your Drizzle database instance.
 
 const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
   email: text("email").notNull(),
-  secret: text("secret").notNull(),
+  passwordHash: text("password_hash").notNull(),
 });
 
-const appRouter = createDbRouter({
+export const appRouter = createDbRouter({
   db,
   trpc: t,
   tables: {
     users: defineTable(users, {
-      name: "users",
       policy: policy<Context>()({
         all: allow.authenticated(),
       }),
       fields: {
-        hidden: ["secret"],
+        hidden: ["passwordHash"],
         readonly: ["id"],
       },
       query: {
@@ -71,127 +78,306 @@ const appRouter = createDbRouter({
         list: true,
         get: true,
         create: true,
+        createMany: true,
         update: true,
         delete: true,
+        deleteMany: true,
       },
     }),
   },
 });
 
 export type AppRouter = typeof appRouter;
+```
 
+```ts
 const caller = t.createCallerFactory(appRouter)({
   user: { id: 1, role: "admin" },
 });
 
-await caller.users.list({});
+const page = await caller.users.findMany({
+  filters: {
+    email: { op: "contains", value: "@acme.com" },
+  },
+  sort: [{ column: "id", direction: "desc" }],
+  pagination: { page: 1, limit: 20 },
+});
 ```
 
-## Core building blocks
+## Plug-And-Play Router
+
+If you already have a table map and want the shortest route to an API, use `createShieldRouter`. Raw resources are normalized into `defineTable(...)` resources for you.
+
+```ts
+import { createShieldRouter, contextGuard } from "drizzle-trpc-shield";
+
+const isSignedIn = contextGuard<Context>((ctx) => Boolean(ctx.user));
+
+export const appRouter = createShieldRouter({
+  db,
+  t,
+  config: {
+    globalGuards: [isSignedIn],
+    resources: {
+      users: {
+        table: users,
+        fields: {
+          hidden: ["passwordHash"],
+          readonly: ["id"],
+        },
+        query: {
+          filterable: ["email", "name"],
+          sortable: ["id"],
+        },
+      },
+    },
+  },
+});
+```
+
+`createShieldRouter` is useful when integrating into existing apps or migrating from a hand-written router. It still keeps the same security model: if no global, resource, or operation policy exists, router creation fails unless you explicitly opt out with `security.requirePolicies: false`.
+
+## Generated Procedures
+
+| Procedure | Kind | Input shape | Notes |
+| --- | --- | --- | --- |
+| `list` | query | `{ where?, orderBy?, limit?, offset? }` | canonical list procedure |
+| `findMany` | query | `{ filters?, sort?, pagination? }` | ergonomic alias for `list` |
+| `get` | query | primary key input | canonical single-row procedure |
+| `findById` | query | primary key input | ergonomic alias for `get` |
+| `create` | mutation | writable insert data | strips hidden, readonly, and non-writable fields |
+| `createMany` | mutation | `{ data: [...] }` | bulk create with the same write protection |
+| `update` | mutation | primary key plus writable data | protects readonly and non-writable fields |
+| `delete` | mutation | primary key input | returns the deleted visible row |
+| `deleteMany` | mutation | `{ where }` or `{ filters }` | requires at least one filter |
+
+The type of each generated procedure is inferred from the Drizzle table, resource options, field visibility, transforms, and enabled operations.
+
+## Core Building Blocks
 
 ### `defineTable`
 
-Wraps a Drizzle table with API behavior:
-
-- `policy` for row-level access rules
-- `fields.hidden` for output masking
-- `fields.readonly` and `fields.writable` for write control
-- `query.filterable` and `query.sortable` for safe list queries
-- `operations` for enabling, disabling, or customizing CRUD operations
-- `plugins` and `meta` for resource-specific extension points
-
-`resource(...)` is still exported as a lower-level alias, but `defineTable(...)` is the preferred name.
-
-### `createDbRouter`
-
-Use this when you want a single router from a table map:
+Use `defineTable` when you want the strictest, most explicit type inference:
 
 ```ts
-const appRouter = createDbRouter({
-  db,
-  trpc: t,
-  tables: {
-    users: defineTable(users, { policy: { all: allow.authenticated() } }),
+const usersResource = defineTable(users, {
+  name: "users",
+  policy: { all: allow.authenticated() },
+  fields: {
+    hidden: ["passwordHash"],
+    readonly: ["id", "createdAt", "updatedAt"],
+    select: ["id", "name", "email", "createdAt"],
+  },
+  columnPolicies: {
+    passwordHash: {
+      readable: false,
+      writable: false,
+      filterable: false,
+      sortable: false,
+    },
+    role: {
+      writable: false,
+    },
+  },
+  query: {
+    filterable: ["email", "name", "role"],
+    sortable: ["id", "name", "createdAt"],
+    defaultLimit: 25,
+    maxLimit: 100,
+  },
+  operations: {
+    list: true,
+    get: true,
+    create: true,
+    update: true,
   },
 });
 ```
 
-### `createShield`
+Use this for production resources where you want the configuration to read like an API contract.
 
-Use this when you want the full shield object:
+### `defineResource`
+
+Use `defineResource` when you prefer a fluent API:
 
 ```ts
-const shield = createShield({
-  db,
-  trpc: t,
-  resources: {
-    users: defineTable(users, { policy: { all: allow.authenticated() } }),
-  },
-});
+import {
+  defineResource,
+  hasRole,
+  injectField,
+  scopeToTenant,
+  toISOString,
+} from "drizzle-trpc-shield";
 
-export const appRouter = shield.router;
+const postsResource = defineResource<typeof posts, Context>(posts)
+  .operations("findMany", "findById", "create", "update", "delete")
+  .guards(scopeToTenant<Context, typeof posts>("tenantId", (ctx) => ctx.user?.tenantId))
+  .operationGuards("delete", hasRole<Context>((ctx) => ctx.user?.role, "admin"))
+  .columnPolicy("tenantId", { writable: false, filterable: false })
+  .beforeQuery("create", injectField("tenantId", (ctx) => ctx.user?.tenantId))
+  .transform("createdAt", toISOString)
+  .defaultSelect("id", "tenantId", "title", "createdAt")
+  .pagination({
+    mode: "cursor",
+    cursorColumn: "id",
+    defaultLimit: 20,
+    maxLimit: 100,
+  })
+  .build();
 ```
+
+`defineTable` is best for exact literal config inference. `defineResource` is best for progressive setup and discoverable DX.
 
 ### `ApiContext`
 
-Type your request context once and let it flow through policies, hooks, and plugins:
+Define request context once, then use it everywhere:
 
 ```ts
 type Context = ApiContext<{
   user?: {
-    id: number;
-    tenantId: number;
-    role: "admin" | "member";
+    id: string;
+    tenantId: string;
+    role: "owner" | "admin" | "member";
+    permissions: string[];
   };
   req: Request;
 }>;
 ```
 
-## Practical examples
+Policies, guard helpers, hook handlers, and plugins all receive this typed context.
 
-### 1. Hidden secrets and read-only columns
+### Policies And Guards
 
-```ts
-defineTable(users, {
-  policy: { all: allow.authenticated() },
-  fields: {
-    hidden: ["secret"],
-    readonly: ["id", "createdAt", "updatedAt"],
-  },
-});
-```
-
-Use this for password hashes, internal flags, or any column that should never leak through the API.
-
-### 2. Multi-tenant row-level access
-
-Assume `posts` is a Drizzle table with `tenantId`, `authorId`, and `title` columns.
+You can use the low-level policy helpers:
 
 ```ts
-import { eq } from "drizzle-orm";
-
 defineTable(posts, {
   policy: policy<Context>()({
     all: allow.authenticated(),
     before: {
       list: allow.scope(({ ctx }) => eq(posts.tenantId, ctx.user!.tenantId)),
-      get: allow.scope(({ ctx }) => eq(posts.tenantId, ctx.user!.tenantId)),
-      update: allow.scope(({ ctx }) => eq(posts.tenantId, ctx.user!.tenantId)),
-      delete: allow.role<Context, typeof posts>("admin"),
-    },
-    after: {
-      get: allow.owner({
-        userId: (ctx) => ctx.user?.id,
-        rowUserId: (row) => row.authorId,
-      }),
+      update: allow.role("admin", (ctx) => ctx.user?.role),
     },
   }),
 });
 ```
 
-Use this for SaaS products where every request must stay inside the caller's tenant boundary.
+Or use guard helpers when you want reusable rules:
 
-### 3. Audit logging with hooks
+```ts
+import {
+  and,
+  contextGuard,
+  hasPermission,
+  hasRole,
+  readOnly,
+} from "drizzle-trpc-shield";
+
+const isSignedIn = contextGuard<Context>((ctx) => Boolean(ctx.user));
+const canManageUsers = hasPermission<Context>(
+  (ctx) => ctx.user?.permissions,
+  "users:manage",
+);
+
+const usersResource = defineTable(users, {
+  policy: {
+    all: isSignedIn,
+    before: {
+      list: readOnly(),
+      update: and(hasRole<Context>((ctx) => ctx.user?.role, ["owner", "admin"]), canManageUsers),
+    },
+  },
+});
+```
+
+Available helpers include `contextGuard`, `hasRole`, `hasPermission`, `and`, `or`, `not`, `readOnly`, `scopeToTenant`, and `injectField`.
+
+### Field Security
+
+There are two layers of field control:
+
+```ts
+defineTable(users, {
+  policy: { all: allow.authenticated() },
+  fields: {
+    hidden: ["passwordHash"],
+    readonly: ["id", "createdAt"],
+    writable: ["name", "email"],
+    select: ["id", "name", "email", "createdAt"],
+  },
+  columnPolicies: {
+    passwordHash: {
+      readable: false,
+      writable: false,
+      filterable: false,
+      sortable: false,
+    },
+    emailVerifiedAt: {
+      writable: false,
+    },
+  },
+});
+```
+
+`fields` is the resource-level API shape. `columnPolicies` is the stricter per-column security layer. If a column is not readable, it is removed from output and cannot be filtered or sorted. If it is not writable, client input cannot set it.
+
+### Querying
+
+Canonical list input:
+
+```ts
+await caller.users.list({
+  where: {
+    email: { contains: "@acme.com" },
+    createdAt: { between: [from, to] },
+  },
+  orderBy: [{ field: "id", direction: "desc" }],
+  limit: 50,
+  offset: 0,
+});
+```
+
+Ergonomic alias input:
+
+```ts
+await caller.users.findMany({
+  filters: {
+    email: { op: "contains", value: "@acme.com" },
+    status: { op: "in", values: ["active", "invited"] },
+  },
+  sort: [{ column: "createdAt", direction: "desc" }],
+  pagination: { page: 1, limit: 25 },
+});
+```
+
+Supported filter operators include `eq`, `ne`, `neq`, `in`, `notIn`, `isNull`, `isNotNull`, `gt`, `gte`, `lt`, `lte`, `between`, `like`, `ilike`, `contains`, `startsWith`, and `endsWith`.
+
+### Transforms
+
+Transforms run before data leaves the generated API:
+
+```ts
+import { parseJSON, redact, toISOString, trimString } from "drizzle-trpc-shield";
+
+defineTable(users, {
+  policy: { all: allow.authenticated() },
+  transforms: {
+    name: trimString,
+    metadata: parseJSON,
+    createdAt: toISOString,
+    passwordHash: redact,
+  },
+  columnPolicies: {
+    passwordHash: { readable: false, writable: false },
+  },
+});
+```
+
+Use transforms for serialized dates, JSON text columns, display normalization, and defensive redaction.
+
+### Hooks And Plugins
+
+Hooks can observe or transform input and output around generated operations:
 
 ```ts
 import type { ShieldPlugin } from "drizzle-trpc-shield";
@@ -199,28 +385,137 @@ import type { ShieldPlugin } from "drizzle-trpc-shield";
 const auditPlugin: ShieldPlugin<Context> = {
   name: "audit",
   hooks: {
-    beforeCreate({ resourceName, ctx, input }) {
-      console.log("creating", resourceName, ctx.user?.id, input);
+    beforeCreate({ ctx, resourceName, input }) {
+      console.log("create", resourceName, ctx.user?.id, input);
+      return input;
     },
-    afterUpdate({ resourceName, ctx, result }) {
-      console.log("updated", resourceName, ctx.user?.id, result);
+    afterUpdate({ ctx, resourceName, result }) {
+      console.log("update", resourceName, ctx.user?.id, result);
+      return result;
     },
   },
 };
 
-const shield = createShield({
+const appRouter = createDbRouter({
   db,
   trpc: t,
   plugins: [auditPlugin],
-  resources: {
+  tables: {
     users: defineTable(users, { policy: { all: allow.authenticated() } }),
   },
 });
 ```
 
-Use this for audit trails, analytics, cache invalidation, and side effects that should stay outside the core resolver logic.
+Resource-level plugins are also supported:
 
-### 4. Custom resource behavior
+```ts
+defineTable(users, {
+  policy: { all: allow.authenticated() },
+  plugins: [auditPlugin],
+});
+```
+
+### Logging Hooks
+
+For simple structured logs:
+
+```ts
+import { createLoggingHooks, type ShieldPlugin } from "drizzle-trpc-shield";
+
+const loggingPlugin: ShieldPlugin<Context> = {
+  name: "logging",
+  hooks: createLoggingHooks((entry) => {
+    console.log(entry.resource, entry.operation, entry.durationMs);
+  }),
+};
+```
+
+## Practical Recipes
+
+### Secure Admin Users API
+
+```ts
+const usersResource = defineTable(users, {
+  policy: policy<Context>()({
+    all: allow.authenticated(),
+    before: {
+      create: allow.role("admin", (ctx) => ctx.user?.role),
+      update: allow.role("admin", (ctx) => ctx.user?.role),
+      delete: allow.role("owner", (ctx) => ctx.user?.role),
+      deleteMany: allow.role("owner", (ctx) => ctx.user?.role),
+    },
+  }),
+  fields: {
+    hidden: ["passwordHash", "resetToken"],
+    readonly: ["id", "createdAt", "updatedAt"],
+  },
+  columnPolicies: {
+    passwordHash: { readable: false, writable: false, filterable: false, sortable: false },
+    resetToken: { readable: false, writable: false, filterable: false, sortable: false },
+  },
+  query: {
+    filterable: ["email", "role"],
+    sortable: ["id", "email", "createdAt"],
+    defaultLimit: 25,
+    maxLimit: 100,
+  },
+  operations: {
+    list: true,
+    get: true,
+    create: true,
+    createMany: false,
+    update: true,
+    delete: true,
+    deleteMany: true,
+  },
+});
+```
+
+This gives you an admin-ready router while keeping secrets out of output, filters, sorts, and client writes.
+
+### Multi-Tenant SaaS Resource
+
+```ts
+const projectsResource = defineResource<typeof projects, Context>(projects)
+  .guards(
+    contextGuard<Context>((ctx) => Boolean(ctx.user)),
+    scopeToTenant<Context, typeof projects>("tenantId", (ctx) => ctx.user?.tenantId),
+  )
+  .columnPolicy("tenantId", { writable: false, filterable: false })
+  .beforeQuery("create", injectField("tenantId", (ctx) => ctx.user?.tenantId))
+  .beforeQuery("createMany", injectField("tenantId", (ctx) => ctx.user?.tenantId))
+  .operations("findMany", "findById", "create", "createMany", "update", "delete")
+  .build();
+```
+
+The client never sends `tenantId`; the server injects it after validation, and row-level scopes keep every query inside the caller's tenant.
+
+### Bulk Import
+
+```ts
+await caller.users.createMany({
+  data: [
+    { name: "Ada", email: "ada@acme.com" },
+    { name: "Grace", email: "grace@acme.com" },
+  ],
+});
+```
+
+`createMany` uses the same writable-column rules, policies, hooks, transforms, and output masking as `create`.
+
+### Safe Bulk Cleanup
+
+```ts
+await caller.users.deleteMany({
+  filters: {
+    email: { op: "endsWith", value: "@example.test" },
+  },
+});
+```
+
+`deleteMany` requires at least one filter, only accepts filterable columns, and still applies row-level policy scopes.
+
+### Custom Write Path
 
 ```ts
 defineTable(users, {
@@ -236,32 +531,59 @@ defineTable(users, {
 });
 ```
 
-Use this when one resource needs a special write path, a custom join, or a driver-specific workaround.
+Use custom operation executors when a resource needs special joins, driver-specific behavior, database functions, or a non-standard mutation flow.
 
-## Real-world use cases
+## Real-World Use Cases
 
-- Admin dashboards that need generated CRUD without hand-writing every router
-- Multi-tenant SaaS products that need tenant-scoped access by default
-- Internal tools that must hide sensitive columns but still move fast
-- Mobile or BFF layers that want one typed API per table
-- Regulated workflows that need audit hooks and explicit authorization
-- Prototypes that should stay production-shaped from day one
+- Admin dashboards with generated CRUD and no hand-written router boilerplate
+- Multi-tenant SaaS apps where every query must be tenant-scoped
+- Internal tools that move quickly while hiding sensitive columns
+- BFF layers for web and mobile clients that need one typed API per table
+- Audit-heavy workflows that need consistent lifecycle hooks
+- Data import screens with guarded `createMany`
+- Moderation tools with safe, filtered `deleteMany`
+- Prototypes that should keep production-shaped security from day one
 
-## Architecture map
+## Architecture Map
 
-This package already supports the model you described:
+The current architecture supports the system model:
 
 - `defineTable` wraps a Drizzle schema with per-table config
-- `createDbRouter` emits a tRPC router from table definitions
-- `ApiContext` defines the typed per-request context
-- access control comes from composable `allow` / `deny` / `policy` rules
-- row-level filtering is handled through scope-producing policies
-- field visibility is handled through `hidden`, `readonly`, and `writable`
-- hooks include `beforeCreate`, `afterUpdate`, and the rest of the CRUD lifecycle
-- `ShieldPlugin` is the extension surface for middleware-like behavior and resource init
+- `defineResource` adds fluent resource composition for DX
+- `createDbRouter` turns table definitions into a tRPC router
+- `createShieldRouter` accepts raw resource configs and emits the same generated API
+- `ApiContext` is the typed request context for policies, hooks, plugins, and guards
+- access policies are composable through `allow`, `deny`, `policy`, and guard helpers
+- row-level access is expressed as SQL scopes returned by policies and guards
+- field-level security is enforced by `fields` and `columnPolicies`
+- lifecycle hooks cover CRUD and bulk operations
+- plugins can observe resource init, transform input/output, and attach side effects
+- validation is adapter-based, with a Zod adapter included by default
+
+## Security Notes
+
+- Access is fail-closed by default. If an operation is enabled, it must have a policy from the global, resource, or operation layer.
+- Hidden and unreadable fields are removed from output.
+- Readonly and non-writable fields are stripped from client writes.
+- Filters and sorts are allow-listed. A column must be explicitly filterable or sortable before the generated API accepts it.
+- Bulk deletes require a filter object.
+- Server-side hooks can inject trusted fields after validation, which is useful for tenant IDs, owner IDs, and audit columns.
+
+## Package Scripts
+
+```bash
+pnpm lint
+pnpm typecheck
+pnpm test:type
+pnpm test
+pnpm build
+pnpm check
+pnpm publint
+pnpm attw --pack .
+```
 
 ## Notes
 
-- `list`, `get`, `create`, `update`, and `delete` are generated automatically when enabled.
 - If your database driver does not support `returning()`, provide a custom `execute` handler for that operation.
-- This package is designed to stay strict: no implicit access, no hidden router magic, and no lost TypeScript inference.
+- `defineTable` gives the tightest literal config inference; `defineResource` gives a more fluent authoring experience.
+- The package is designed to stay explicit: no implicit access, no unbounded filters, and no lost TypeScript inference.

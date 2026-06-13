@@ -61,15 +61,18 @@ export function createMemoryDb(initialRows: Row[]) {
 
     insert() {
       return {
-        values(data: Row) {
+        values(data: Row | Row[]) {
           return {
             returning(selection?: Record<string, unknown>) {
-              const row = { ...data };
-              if (row["id"] === undefined) {
-                row["id"] = rows.length + 1;
-              }
-              rows = [...rows, row];
-              return Promise.resolve([projectRow(row, selection)]);
+              const items = (Array.isArray(data) ? data : [data]).map((item, index) => {
+                const row = { ...item };
+                if (row["id"] === undefined) {
+                  row["id"] = rows.length + index + 1;
+                }
+                return row;
+              });
+              rows = [...rows, ...items];
+              return Promise.resolve(items.map((row) => projectRow(row, selection)));
             },
           };
         },
@@ -86,8 +89,9 @@ export function createMemoryDb(initialRows: Row[]) {
                   if (rows.length === 0) {
                     return Promise.resolve([]);
                   }
-                  rows[0] = { ...rows[0], ...data };
-                  return Promise.resolve([projectRow(rows[0], selection)]);
+                  rows = rows.map((row, index) => (index === 0 ? { ...row, ...data } : row));
+                  const updated = rows[0];
+                  return Promise.resolve(updated ? [projectRow(updated, selection)] : []);
                 },
               };
             },
@@ -101,8 +105,9 @@ export function createMemoryDb(initialRows: Row[]) {
         where() {
           return {
             returning(selection?: Record<string, unknown>) {
-              const [row] = rows.splice(0, 1);
-              return Promise.resolve(row ? [projectRow(row, selection)] : []);
+              const deleted = rows;
+              rows = [];
+              return Promise.resolve(deleted.map((row) => projectRow(row, selection)));
             },
           };
         },

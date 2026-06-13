@@ -34,6 +34,13 @@ function columnHasDefault(column: AnyColumn): boolean {
   return Boolean((column as unknown as { hasDefault?: boolean }).hasDefault);
 }
 
+function paginationLimits(resource: AnyResource): { defaultLimit: number; maxLimit: number } {
+  const pagination = resource.options.pagination;
+  const defaultLimit = pagination?.defaultLimit ?? resource.options.query?.defaultLimit ?? 25;
+  const maxLimit = pagination?.maxLimit ?? resource.options.query?.maxLimit ?? 100;
+  return { defaultLimit: Math.min(defaultLimit, maxLimit), maxLimit };
+}
+
 function columnToZod(column: AnyColumn): ZodTypeAny {
   const enumValues = columnEnumValues(column);
   let schema: ZodTypeAny;
@@ -101,6 +108,31 @@ function primaryKeySchema(resource: AnyResource): ZodObject<any> {
   return z.object({ where: z.object(shape).strict() }).strict();
 }
 
+function filterSchema(resource: AnyResource, requireAtLeastOne = false): ZodTypeAny {
+  const columns = getColumns(resource.table);
+  const filterable = (resource.options.query?.filterable ?? [])
+    .map(String)
+    .filter((name) => {
+      const policy = resource.options.columnPolicies?.[name];
+      return policy?.readable !== false && policy?.filterable !== false;
+    });
+  const shape = Object.fromEntries(
+    filterable.map((name) => {
+      const column = columns[name];
+      if (!column) {
+        throw new ConfigurationError(`Unknown filterable column "${name}".`);
+      }
+      return [name, filterValueSchema(column).optional()];
+    }),
+  );
+
+  const schema = z.object(shape).strict();
+  if (requireAtLeastOne) {
+    return schema.refine((value: Record<string, unknown>) => Object.keys(value).length > 0, "Delete many requires at least one filter.");
+  }
+  return schema;
+}
+
 function createSchema(resource: AnyResource): ZodObject<any> {
   const columns = getColumns(resource.table);
   const writable = writableColumnNames(resource);
@@ -144,20 +176,25 @@ function updateSchema(resource: AnyResource): ZodObject<any> {
 
 function filterValueSchema(column: AnyColumn): ZodTypeAny {
   const scalar = columnToZod(column);
+  const dataType = columnDataType(column);
   const operators: Record<string, ZodTypeAny> = {
     eq: scalar.optional(),
     ne: scalar.optional(),
+    neq: scalar.optional(),
     in: z.array(scalar).optional(),
     notIn: z.array(scalar).optional(),
     isNull: z.boolean().optional(),
+    isNotNull: z.boolean().optional(),
   };
+  const valueOperators = ["eq", "ne", "neq"] as string[];
 
-  const dataType = columnDataType(column);
   if (dataType === "number" || dataType === "bigint" || dataType === "date") {
     operators["gt"] = scalar.optional();
     operators["gte"] = scalar.optional();
     operators["lt"] = scalar.optional();
     operators["lte"] = scalar.optional();
+    operators["between"] = z.tuple([scalar, scalar]).optional();
+    valueOperators.push("gt", "gte", "lt", "lte");
   }
 
   if (dataType === "string" || !dataType) {
@@ -166,32 +203,63 @@ function filterValueSchema(column: AnyColumn): ZodTypeAny {
     operators["contains"] = z.string().optional();
     operators["startsWith"] = z.string().optional();
     operators["endsWith"] = z.string().optional();
+    valueOperators.push("like", "ilike", "contains", "startsWith", "endsWith");
   }
 
-  return z.union([scalar, z.object(operators).strict()]);
+  const opSchemas = [
+    scalar,
+    z.object(operators).strict(),
+    z
+      .object({
+        op: stringEnum(valueOperators),
+        value: scalar,
+      })
+      .strict(),
+    z
+      .object({
+        op: z.enum(["in", "notIn"]),
+        values: z.array(scalar),
+      })
+      .strict(),
+    z
+      .object({
+        op: z.enum(["isNull", "isNotNull"]),
+      })
+      .strict(),
+  ] as [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]];
+
+  if (dataType === "number" || dataType === "bigint" || dataType === "date") {
+    opSchemas.push(
+      z
+        .object({
+          op: z.literal("between"),
+          values: z.tuple([scalar, scalar]),
+        })
+        .strict(),
+    );
+  }
+
+  return z.union(opSchemas);
 }
 
 function listSchema(resource: AnyResource): ZodObject<any> {
   const columns = getColumns(resource.table);
-  const filterable = (resource.options.query?.filterable ?? []).map(String);
-  const sortable = (resource.options.query?.sortable ?? []).map(String);
-  const defaultLimit = resource.options.query?.defaultLimit ?? 25;
-  const maxLimit = resource.options.query?.maxLimit ?? 100;
-  const effectiveDefaultLimit = Math.min(defaultLimit, maxLimit);
-
-  const whereShape = Object.fromEntries(
-    filterable.map((name) => {
-      const column = columns[name];
-      if (!column) {
-        throw new ConfigurationError(`Unknown filterable column "${name}".`);
-      }
-      return [name, filterValueSchema(column).optional()];
-    }),
-  );
+  const sortable = (resource.options.query?.sortable ?? [])
+    .map(String)
+    .filter((name) => {
+      const policy = resource.options.columnPolicies?.[name];
+      return policy?.readable !== false && policy?.sortable !== false;
+    });
+  const { defaultLimit, maxLimit } = paginationLimits(resource);
+  const cursorColumn = resource.options.pagination?.mode === "cursor" ? resource.options.pagination.cursorColumn : undefined;
+  if (cursorColumn && !sortable.includes(String(cursorColumn))) {
+    sortable.push(String(cursorColumn));
+  }
 
   return z
     .object({
-      where: z.object(whereShape).strict().optional(),
+      where: filterSchema(resource).optional(),
+      filters: filterSchema(resource).optional(),
       orderBy: z
         .array(
           z
@@ -202,10 +270,47 @@ function listSchema(resource: AnyResource): ZodObject<any> {
             .strict(),
         )
         .optional(),
-      limit: z.number().int().positive().max(maxLimit).default(effectiveDefaultLimit),
+      sort: z
+        .array(
+          z
+            .object({
+              column: stringEnum(sortable),
+              direction: z.enum(["asc", "desc"]).default("asc"),
+            })
+            .strict(),
+        )
+        .optional(),
+      limit: z.number().int().positive().max(maxLimit).default(defaultLimit),
       offset: z.number().int().min(0).default(0),
+      pagination: z
+        .object({
+          page: z.number().int().min(1).optional(),
+          limit: z.number().int().positive().max(maxLimit).optional(),
+          cursor:
+            cursorColumn && columns[cursorColumn]
+              ? columnToZod(columns[cursorColumn]).optional()
+              : z.unknown().optional(),
+        })
+        .strict()
+        .optional(),
     })
     .strict();
+}
+
+function createManySchema(resource: AnyResource): ZodObject<any> {
+  const itemSchema = createSchema(resource);
+  return z.object({ data: z.array(itemSchema).min(1).max(500) }).strict();
+}
+
+function deleteManySchema(resource: AnyResource): ZodTypeAny {
+  const filters = filterSchema(resource, true);
+  return z
+    .object({
+      where: filters.optional(),
+      filters: filters.optional(),
+    })
+    .strict()
+    .refine((value) => value.where !== undefined || value.filters !== undefined, "Delete many requires filters.");
 }
 
 export function createZodValidationAdapter(): ValidationAdapter {
@@ -224,6 +329,10 @@ export function createZodValidationAdapter(): ValidationAdapter {
           return primaryKeySchema(resource);
         case "create":
           return createSchema(resource);
+        case "createMany":
+          return createManySchema(resource);
+        case "deleteMany":
+          return deleteManySchema(resource);
         case "update":
           return updateSchema(resource);
       }

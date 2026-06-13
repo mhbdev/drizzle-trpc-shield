@@ -21,8 +21,25 @@ const usersResource = defineTable(users, {
   operations: { list: true, get: true, create: true, update: true, delete: true },
 });
 
+const secureUsersResource = defineTable(users, {
+  name: "secureUsers",
+  policy: { all: allow.all() },
+  fields: { readonly: ["id"] },
+  columnPolicies: {
+    secret: { readable: false, writable: false, filterable: false },
+  },
+  transforms: {
+    name: (value: string) => value.toUpperCase(),
+  },
+  query: { filterable: ["email", "secret"], sortable: ["name"] },
+  operations: { list: true, get: true, create: true, createMany: true, deleteMany: true },
+});
+
 type CreateInput = InferResourceInput<typeof usersResource, "create">;
 type ListOutput = InferResourceOutput<typeof usersResource, "list">;
+type SecureCreateInput = InferResourceInput<typeof secureUsersResource, "create">;
+type SecureCreateManyInput = InferResourceInput<typeof secureUsersResource, "createMany">;
+type SecureOutput = InferResourceOutput<typeof secureUsersResource, "get">;
 
 expectTypeOf<CreateInput>().toEqualTypeOf<{
   name: string;
@@ -39,7 +56,26 @@ expectTypeOf<ListOutput>().toEqualTypeOf<{
     limit: number;
     offset: number;
     hasMore: boolean;
+    nextCursor?: unknown;
   };
+}>();
+
+expectTypeOf<SecureCreateInput>().toEqualTypeOf<{
+  name: string;
+  email: string;
+}>();
+
+expectTypeOf<SecureCreateManyInput>().toEqualTypeOf<{
+  data: readonly {
+    name: string;
+    email: string;
+  }[];
+}>();
+
+expectTypeOf<SecureOutput>().toEqualTypeOf<{
+  id: number;
+  name: string;
+  email: string;
 }>();
 
 const shield = createShield({

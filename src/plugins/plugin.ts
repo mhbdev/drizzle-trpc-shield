@@ -30,23 +30,27 @@ export type ShieldOperationHooks<TContext = unknown> = {
   afterGet?: (args: OperationHookArgs<TContext, "get">) => MaybePromise<void>;
   beforeCreate?: (args: OperationHookArgs<TContext, "create">) => MaybePromise<void>;
   afterCreate?: (args: OperationHookArgs<TContext, "create">) => MaybePromise<void>;
+  beforeCreateMany?: (args: OperationHookArgs<TContext, "createMany">) => MaybePromise<void>;
+  afterCreateMany?: (args: OperationHookArgs<TContext, "createMany">) => MaybePromise<void>;
   beforeUpdate?: (args: OperationHookArgs<TContext, "update">) => MaybePromise<void>;
   afterUpdate?: (args: OperationHookArgs<TContext, "update">) => MaybePromise<void>;
   beforeDelete?: (args: OperationHookArgs<TContext, "delete">) => MaybePromise<void>;
   afterDelete?: (args: OperationHookArgs<TContext, "delete">) => MaybePromise<void>;
+  beforeDeleteMany?: (args: OperationHookArgs<TContext, "deleteMany">) => MaybePromise<void>;
+  afterDeleteMany?: (args: OperationHookArgs<TContext, "deleteMany">) => MaybePromise<void>;
 };
 
 export type ShieldPlugin<TContext = unknown> = {
   name: string;
   hooks?: ShieldOperationHooks<TContext> & {
     onResourceInit?: (args: { resource: AnyResource; resourceName: string }) => MaybePromise<void>;
-    beforeValidate?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<void>;
-    afterValidate?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<void>;
+    beforeValidate?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<unknown>;
+    afterValidate?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<unknown>;
     beforeAuthorize?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<void>;
     afterAuthorize?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<void>;
-    beforeQuery?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<void>;
-    afterQuery?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<void>;
-    beforeReturn?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<void>;
+    beforeQuery?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<unknown>;
+    afterQuery?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<unknown>;
+    beforeReturn?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<unknown>;
     onError?: (args: ShieldPluginHookArgs<TContext>) => MaybePromise<void>;
   };
 };

@@ -24,13 +24,16 @@ import { getColumns } from "../drizzle/columns.js";
 const OPERATOR_KEYS = new Set([
   "eq",
   "ne",
+  "neq",
   "in",
   "notIn",
   "isNull",
+  "isNotNull",
   "gt",
   "gte",
   "lt",
   "lte",
+  "between",
   "like",
   "ilike",
   "contains",
@@ -46,12 +49,34 @@ function isOperatorObject(value: unknown): value is Record<string, unknown> {
   return Object.keys(value).some((key) => OPERATOR_KEYS.has(key));
 }
 
+function isOpFilterObject(value: unknown): value is { op: string; value?: unknown; values?: readonly unknown[] } {
+  return Boolean(value && typeof value === "object" && "op" in value);
+}
+
 function filterableColumns(resource: AnyResource): Set<string> {
-  return new Set((resource.options.query?.filterable ?? []).map(String));
+  return new Set(
+    (resource.options.query?.filterable ?? [])
+      .map(String)
+      .filter((name) => {
+        const policy = resource.options.columnPolicies?.[name];
+        return policy?.readable !== false && policy?.filterable !== false;
+      }),
+  );
 }
 
 function sortableColumns(resource: AnyResource): Set<string> {
-  return new Set((resource.options.query?.sortable ?? []).map(String));
+  const columns = new Set(
+    (resource.options.query?.sortable ?? [])
+      .map(String)
+      .filter((name) => {
+        const policy = resource.options.columnPolicies?.[name];
+        return policy?.readable !== false && policy?.sortable !== false;
+      }),
+  );
+  if (resource.options.pagination?.mode === "cursor") {
+    columns.add(String(resource.options.pagination.cursorColumn));
+  }
+  return columns;
 }
 
 function assertFilterable(resource: AnyResource, field: string): void {
@@ -85,6 +110,9 @@ function buildOperatorClauses(column: unknown, operators: Record<string, unknown
   if ("ne" in operators) {
     clauses.push(neOrNull(column, operators["ne"]));
   }
+  if ("neq" in operators) {
+    clauses.push(neOrNull(column, operators["neq"]));
+  }
   if (Array.isArray(operators["in"])) {
     clauses.push(inArray(column as never, [...(operators["in"] as readonly unknown[])]));
   }
@@ -97,6 +125,12 @@ function buildOperatorClauses(column: unknown, operators: Record<string, unknown
   if (operators["isNull"] === false) {
     clauses.push(isNotNull(column as never));
   }
+  if (operators["isNotNull"] === true) {
+    clauses.push(isNotNull(column as never));
+  }
+  if (operators["isNotNull"] === false) {
+    clauses.push(isNull(column as never));
+  }
   if ("gt" in operators) {
     clauses.push(gt(column as never, operators["gt"]));
   }
@@ -108,6 +142,11 @@ function buildOperatorClauses(column: unknown, operators: Record<string, unknown
   }
   if ("lte" in operators) {
     clauses.push(lte(column as never, operators["lte"]));
+  }
+  const between = operators["between"];
+  if (Array.isArray(between) && between.length === 2) {
+    const [from, to] = between;
+    clauses.push(gte(column as never, from), lte(column as never, to));
   }
   if (typeof operators["like"] === "string") {
     clauses.push(like(column as never, operators["like"]));
@@ -128,6 +167,33 @@ function buildOperatorClauses(column: unknown, operators: Record<string, unknown
   return clauses;
 }
 
+function normalizeOpFilter(value: { op: string; value?: unknown; values?: readonly unknown[] }): Record<string, unknown> {
+  switch (value.op) {
+    case "eq":
+    case "ne":
+    case "neq":
+    case "gt":
+    case "gte":
+    case "lt":
+    case "lte":
+    case "like":
+    case "ilike":
+    case "contains":
+    case "startsWith":
+    case "endsWith":
+      return { [value.op]: value.value };
+    case "in":
+    case "notIn":
+    case "between":
+      return { [value.op]: value.values };
+    case "isNull":
+    case "isNotNull":
+      return { [value.op]: true };
+    default:
+      throw new ConfigurationError(`Unsupported filter operator "${value.op}".`);
+  }
+}
+
 export function buildWhere(resource: AnyResource, where: Record<string, unknown> | undefined, scopes: readonly SQL[] = []): SQL | undefined {
   const columns = getColumns(resource.table);
   const clauses: SQL[] = [...scopes];
@@ -140,7 +206,9 @@ export function buildWhere(resource: AnyResource, where: Record<string, unknown>
       throw new ConfigurationError(`Unknown filter column "${field}".`);
     }
 
-    if (isOperatorObject(value)) {
+    if (isOpFilterObject(value)) {
+      clauses.push(...buildOperatorClauses(column, normalizeOpFilter(value)));
+    } else if (isOperatorObject(value)) {
       clauses.push(...buildOperatorClauses(column, value));
     } else {
       clauses.push(eqOrNull(column, value));
