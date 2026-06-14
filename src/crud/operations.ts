@@ -303,10 +303,11 @@ export async function executeUpdate<TContext extends object>(args: CrudArgs<TCon
     if (!current) {
       throw new NotFoundError(`${runtimeArgs.resourceName} was not found.`);
     }
-    await authorizeAfter({ ...runtimeArgs, row: current });
 
     const originalInput = args.input as { data?: Record<string, unknown> };
     const data = pickWritableDataWithInjectedFields(runtimeArgs.resource, originalInput.data ?? {}, input.data);
+    await authorizeAfter({ ...runtimeArgs, row: { ...current, ...data } });
+
     const query = runtimeArgs.db.update(runtimeArgs.resource.table).set(data).where(where);
     const rows = await executeReturningOrThrow(
       query,
@@ -317,7 +318,6 @@ export async function executeUpdate<TContext extends object>(args: CrudArgs<TCon
     if (!row) {
       throw new NotFoundError(`${runtimeArgs.resourceName} update did not return a row.`);
     }
-
     return maskRow(runtimeArgs.resource, row);
   });
 }

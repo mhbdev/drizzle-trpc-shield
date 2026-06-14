@@ -164,4 +164,66 @@ describe("advanced compatibility features", () => {
       meta: { count: 2 },
     });
   });
+
+  it("rejects hidden columns in list filters", async () => {
+    const shield = createShield({
+      db: createMemoryDb([
+        { id: 1, name: "Ada", email: "ada@example.com", secret: "hidden", orgId: 10 },
+      ]),
+      trpc: t,
+      resources: {
+        accounts: defineTable(accounts, {
+          name: "accounts",
+          policy: { all: allow.all() },
+          fields: { hidden: ["secret"], readonly: ["id"] },
+          query: { filterable: ["name", "secret"], sortable: ["id"] },
+          operations: {
+            list: true,
+          },
+        }),
+      },
+    });
+    const caller = t.createCallerFactory(shield.router)({});
+
+    await expect(
+      caller.accounts.list({ where: { secret: { op: "eq", value: "hidden" } } }),
+    ).rejects.toThrow();
+  });
+
+  it("blocks updates that would violate after-update policies", async () => {
+    const db = createMemoryDb([
+      { id: 1, name: "Ada", email: "ada@example.com", secret: "hidden", orgId: 10 },
+    ]);
+    const shield = createShield({
+      db,
+      trpc: t,
+      resources: {
+        accounts: defineTable(accounts, {
+          name: "accounts",
+          policy: {
+            all: allow.all(),
+            after: {
+              update: allow.owner({
+                userId: (ctx) => ctx.session?.orgId,
+                rowUserId: (row) => row.orgId,
+              }),
+            },
+          },
+          fields: { hidden: ["secret"], readonly: ["id"] },
+          operations: {
+            list: true,
+            update: true,
+          },
+        }),
+      },
+    });
+    const caller = t.createCallerFactory(shield.router)({
+      session: { userId: 1, orgId: 10, role: "admin" },
+    });
+
+    await expect(caller.accounts.update({ id: 1, data: { orgId: 11 } })).rejects.toThrow();
+    expect(db.snapshot()).toEqual([
+      { id: 1, name: "Ada", email: "ada@example.com", secret: "hidden", orgId: 10 },
+    ]);
+  });
 });

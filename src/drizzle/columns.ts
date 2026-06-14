@@ -64,6 +64,25 @@ export function resolveColumnNames(resource: AnyResource): string[] {
   return Object.keys(getColumns(resource.table));
 }
 
+function hiddenColumnNames(resource: AnyResource): Set<string> {
+  return new Set((resource.options.fields?.hidden ?? []).map(String));
+}
+
+function isReadableColumn(resource: AnyResource, name: string): boolean {
+  const columnPolicy = resource.options.columnPolicies?.[name];
+  return columnPolicy?.readable !== false;
+}
+
+function isFilterableColumn(resource: AnyResource, name: string): boolean {
+  const columnPolicy = resource.options.columnPolicies?.[name];
+  return columnPolicy?.filterable !== false;
+}
+
+function isSortableColumn(resource: AnyResource, name: string): boolean {
+  const columnPolicy = resource.options.columnPolicies?.[name];
+  return columnPolicy?.sortable !== false;
+}
+
 function selectedColumnNames(resource: AnyResource): string[] {
   const columns = resolveColumnNames(resource);
   const selected = resource.options.fields?.select?.map(String);
@@ -71,10 +90,9 @@ function selectedColumnNames(resource: AnyResource): string[] {
 }
 
 export function visibleColumnNames(resource: AnyResource): string[] {
-  const hidden = new Set((resource.options.fields?.hidden ?? []).map(String));
+  const hidden = hiddenColumnNames(resource);
   return selectedColumnNames(resource).filter((name) => {
-    const columnPolicy = resource.options.columnPolicies?.[name];
-    return !hidden.has(name) && columnPolicy?.readable !== false;
+    return !hidden.has(name) && isReadableColumn(resource, name);
   });
 }
 
@@ -93,6 +111,32 @@ export function writableColumnNames(resource: AnyResource): string[] {
   const hidden = new Set((resource.options.fields?.hidden ?? []).map(String));
   const readonly = new Set((resource.options.fields?.readonly ?? []).map(String));
   return columns.filter((name) => !hidden.has(name) && !readonly.has(name) && isWritableByPolicy(name));
+}
+
+export function filterableColumnNames(resource: AnyResource): string[] {
+  const columns = resolveColumnNames(resource);
+  const hidden = hiddenColumnNames(resource);
+
+  return (resource.options.query?.filterable ?? [])
+    .map(String)
+    .filter((name) => columns.includes(name) && !hidden.has(name) && isReadableColumn(resource, name) && isFilterableColumn(resource, name));
+}
+
+export function sortableColumnNames(resource: AnyResource): string[] {
+  const columns = resolveColumnNames(resource);
+  const hidden = hiddenColumnNames(resource);
+  const names = (resource.options.query?.sortable ?? [])
+    .map(String)
+    .filter((name) => columns.includes(name) && !hidden.has(name) && isReadableColumn(resource, name) && isSortableColumn(resource, name));
+
+  if (resource.options.pagination?.mode === "cursor") {
+    const cursorColumn = String(resource.options.pagination.cursorColumn);
+    if (columns.includes(cursorColumn) && !hidden.has(cursorColumn) && !names.includes(cursorColumn)) {
+      names.push(cursorColumn);
+    }
+  }
+
+  return names;
 }
 
 export function visibleSelection(resource: AnyResource): ColumnMap {

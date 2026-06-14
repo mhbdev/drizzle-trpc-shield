@@ -4,7 +4,13 @@ import { z, type ZodObject, type ZodTypeAny } from "zod";
 import { ConfigurationError } from "../core/errors.js";
 import type { OperationName } from "../core/types.js";
 import type { AnyResource } from "../core/resource.js";
-import { getColumns, normalizePrimaryKey, writableColumnNames } from "../drizzle/columns.js";
+import {
+  filterableColumnNames,
+  getColumns,
+  normalizePrimaryKey,
+  sortableColumnNames,
+  writableColumnNames,
+} from "../drizzle/columns.js";
 
 export type ValidationAdapter = {
   inputFor(resource: AnyResource, operation: OperationName): ZodTypeAny;
@@ -32,6 +38,13 @@ function columnNotNull(column: AnyColumn): boolean {
 
 function columnHasDefault(column: AnyColumn): boolean {
   return Boolean((column as unknown as { hasDefault?: boolean }).hasDefault);
+}
+
+function unwrapNullable(schema: ZodTypeAny): ZodTypeAny {
+  if (schema instanceof z.ZodNullable) {
+    return schema.unwrap() as unknown as ZodTypeAny;
+  }
+  return schema;
 }
 
 function paginationLimits(resource: AnyResource): { defaultLimit: number; maxLimit: number } {
@@ -110,12 +123,7 @@ function primaryKeySchema(resource: AnyResource): ZodObject<any> {
 
 function filterSchema(resource: AnyResource, requireAtLeastOne = false): ZodTypeAny {
   const columns = getColumns(resource.table);
-  const filterable = (resource.options.query?.filterable ?? [])
-    .map(String)
-    .filter((name) => {
-      const policy = resource.options.columnPolicies?.[name];
-      return policy?.readable !== false && policy?.filterable !== false;
-    });
+  const filterable = filterableColumnNames(resource);
   const shape = Object.fromEntries(
     filterable.map((name) => {
       const column = columns[name];
@@ -176,6 +184,7 @@ function updateSchema(resource: AnyResource): ZodObject<any> {
 
 function filterValueSchema(column: AnyColumn): ZodTypeAny {
   const scalar = columnToZod(column);
+  const comparable = unwrapNullable(scalar);
   const dataType = columnDataType(column);
   const operators: Record<string, ZodTypeAny> = {
     eq: scalar.optional(),
@@ -186,15 +195,13 @@ function filterValueSchema(column: AnyColumn): ZodTypeAny {
     isNull: z.boolean().optional(),
     isNotNull: z.boolean().optional(),
   };
-  const valueOperators = ["eq", "ne", "neq"] as string[];
 
   if (dataType === "number" || dataType === "bigint" || dataType === "date") {
-    operators["gt"] = scalar.optional();
-    operators["gte"] = scalar.optional();
-    operators["lt"] = scalar.optional();
-    operators["lte"] = scalar.optional();
-    operators["between"] = z.tuple([scalar, scalar]).optional();
-    valueOperators.push("gt", "gte", "lt", "lte");
+    operators["gt"] = comparable.optional();
+    operators["gte"] = comparable.optional();
+    operators["lt"] = comparable.optional();
+    operators["lte"] = comparable.optional();
+    operators["between"] = z.tuple([comparable, comparable]).optional();
   }
 
   if (dataType === "string" || !dataType) {
@@ -203,15 +210,14 @@ function filterValueSchema(column: AnyColumn): ZodTypeAny {
     operators["contains"] = z.string().optional();
     operators["startsWith"] = z.string().optional();
     operators["endsWith"] = z.string().optional();
-    valueOperators.push("like", "ilike", "contains", "startsWith", "endsWith");
   }
 
-  const opSchemas = [
+  const opSchemas: [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]] = [
     scalar,
     z.object(operators).strict(),
     z
       .object({
-        op: stringEnum(valueOperators),
+        op: z.enum(["eq", "ne", "neq"]),
         value: scalar,
       })
       .strict(),
@@ -226,14 +232,31 @@ function filterValueSchema(column: AnyColumn): ZodTypeAny {
         op: z.enum(["isNull", "isNotNull"]),
       })
       .strict(),
-  ] as [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]];
+  ];
 
   if (dataType === "number" || dataType === "bigint" || dataType === "date") {
     opSchemas.push(
       z
         .object({
+          op: z.enum(["gt", "gte", "lt", "lte"]),
+          value: comparable,
+        })
+        .strict(),
+      z
+        .object({
           op: z.literal("between"),
-          values: z.tuple([scalar, scalar]),
+          values: z.tuple([comparable, comparable]),
+        })
+        .strict(),
+    );
+  }
+
+  if (dataType === "string" || !dataType) {
+    opSchemas.push(
+      z
+        .object({
+          op: z.enum(["like", "ilike", "contains", "startsWith", "endsWith"]),
+          value: z.string(),
         })
         .strict(),
     );
@@ -244,17 +267,9 @@ function filterValueSchema(column: AnyColumn): ZodTypeAny {
 
 function listSchema(resource: AnyResource): ZodObject<any> {
   const columns = getColumns(resource.table);
-  const sortable = (resource.options.query?.sortable ?? [])
-    .map(String)
-    .filter((name) => {
-      const policy = resource.options.columnPolicies?.[name];
-      return policy?.readable !== false && policy?.sortable !== false;
-    });
+  const sortable = sortableColumnNames(resource);
   const { defaultLimit, maxLimit } = paginationLimits(resource);
   const cursorColumn = resource.options.pagination?.mode === "cursor" ? resource.options.pagination.cursorColumn : undefined;
-  if (cursorColumn && !sortable.includes(String(cursorColumn))) {
-    sortable.push(String(cursorColumn));
-  }
 
   return z
     .object({

@@ -19,7 +19,7 @@ import {
 
 import { ConfigurationError } from "../core/errors.js";
 import type { AnyResource } from "../core/resource.js";
-import { getColumns } from "../drizzle/columns.js";
+import { filterableColumnNames, getColumns, sortableColumnNames } from "../drizzle/columns.js";
 
 const OPERATOR_KEYS = new Set([
   "eq",
@@ -54,29 +54,11 @@ function isOpFilterObject(value: unknown): value is { op: string; value?: unknow
 }
 
 function filterableColumns(resource: AnyResource): Set<string> {
-  return new Set(
-    (resource.options.query?.filterable ?? [])
-      .map(String)
-      .filter((name) => {
-        const policy = resource.options.columnPolicies?.[name];
-        return policy?.readable !== false && policy?.filterable !== false;
-      }),
-  );
+  return new Set(filterableColumnNames(resource));
 }
 
 function sortableColumns(resource: AnyResource): Set<string> {
-  const columns = new Set(
-    (resource.options.query?.sortable ?? [])
-      .map(String)
-      .filter((name) => {
-        const policy = resource.options.columnPolicies?.[name];
-        return policy?.readable !== false && policy?.sortable !== false;
-      }),
-  );
-  if (resource.options.pagination?.mode === "cursor") {
-    columns.add(String(resource.options.pagination.cursorColumn));
-  }
-  return columns;
+  return new Set(sortableColumnNames(resource));
 }
 
 function assertFilterable(resource: AnyResource, field: string): void {
@@ -224,14 +206,20 @@ export function buildWhere(resource: AnyResource, where: Record<string, unknown>
 
 export function buildOrderBy(resource: AnyResource, orderBy: readonly { field: string; direction?: "asc" | "desc" }[] | undefined): SQL[] {
   const columns = getColumns(resource.table);
+  const cursorColumn = resource.options.pagination?.mode === "cursor" ? String(resource.options.pagination.cursorColumn) : undefined;
 
   return (orderBy ?? []).map((item) => {
-    assertSortable(resource, item.field);
     const column = columns[item.field];
 
     if (!column) {
       throw new ConfigurationError(`Unknown sortable column "${item.field}".`);
     }
+
+    if (cursorColumn && item.field === cursorColumn) {
+      return item.direction === "desc" ? desc(column) : asc(column);
+    }
+
+    assertSortable(resource, item.field);
 
     return item.direction === "desc" ? desc(column) : asc(column);
   });

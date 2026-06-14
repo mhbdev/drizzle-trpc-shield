@@ -1,5 +1,7 @@
 import { initTRPC } from "@trpc/server";
+import { expectTypeOf } from "expect-type";
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import type { inferRouterInputs } from "@trpc/server";
 
 import {
   contextGuard,
@@ -52,5 +54,45 @@ export const appRouter = t.router({
   db: dbRouter,
   healthCheck: t.procedure.query(() => "OK"),
 });
+
+const rawRouter = createShieldRouter({
+  db: {} as never,
+  t,
+  config: {
+    resources: {
+      users: {
+        table: users,
+        policy: { all: isSignedIn },
+        fields: {
+          hidden: ["role"],
+          readonly: ["id"],
+        },
+        query: {
+          filterable: ["name"],
+          sortable: ["name"],
+        },
+        pagination: {
+          mode: "cursor",
+          cursorColumn: "id",
+        },
+        operations: {
+          list: true,
+        },
+      },
+    },
+  },
+});
+
+type RawRouterInputs = inferRouterInputs<typeof rawRouter>;
+
+expectTypeOf<RawRouterInputs["users"]["findMany"]>().toMatchTypeOf<{
+  sort?: readonly {
+    column: "id" | "name";
+    direction?: "asc" | "desc";
+  }[];
+  pagination?: {
+    cursor?: string;
+  };
+}>();
 
 export type AppRouter = typeof appRouter;

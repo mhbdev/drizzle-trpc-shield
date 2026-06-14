@@ -143,6 +143,11 @@ type NonSortableKeys<TConfig> = {
     ? TKey
     : never;
 }[keyof ConfigColumnPolicies<TConfig>];
+type CursorSortableKey<TTable extends AnyTable, TConfig> = TConfig extends {
+  pagination?: { mode: "cursor"; cursorColumn: infer TColumn };
+}
+  ? Extract<TColumn, StringKeyOf<TableSelect<TTable>>>
+  : never;
 type WritableKeysFromConfig<TConfig> = ConfigFields<TConfig> extends { writable?: infer TKeys }
   ? Extract<ArrayValue<NonNullable<TKeys>>, string>
   : never;
@@ -230,6 +235,9 @@ export type SortableKeys<TTable extends AnyTable, TConfig> = QueryOptions<TConfi
         HiddenKeys<TConfig> | NonReadableKeys<TConfig> | NonSortableKeys<TConfig>,
         StringKeyOf<TableSelect<TTable>>
       >
+    > | Exclude<
+      CursorSortableKey<TTable, TConfig>,
+      Extract<HiddenKeys<TConfig> | NonReadableKeys<TConfig> | NonSortableKeys<TConfig>, StringKeyOf<TableSelect<TTable>>>
     >
   : never;
 

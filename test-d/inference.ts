@@ -35,11 +35,26 @@ const secureUsersResource = defineTable(users, {
   operations: { list: true, get: true, create: true, createMany: true, deleteMany: true },
 });
 
+const cursorUsersResource = defineTable(users, {
+  name: "cursorUsers",
+  policy: { all: allow.all() },
+  query: {
+    filterable: ["name"],
+    sortable: ["name"],
+  },
+  pagination: {
+    mode: "cursor",
+    cursorColumn: "id",
+  },
+  operations: { list: true },
+});
+
 type CreateInput = InferResourceInput<typeof usersResource, "create">;
 type ListOutput = InferResourceOutput<typeof usersResource, "list">;
 type SecureCreateInput = InferResourceInput<typeof secureUsersResource, "create">;
 type SecureCreateManyInput = InferResourceInput<typeof secureUsersResource, "createMany">;
 type SecureOutput = InferResourceOutput<typeof secureUsersResource, "get">;
+type CursorListInput = InferResourceInput<typeof cursorUsersResource, "list">;
 
 expectTypeOf<CreateInput>().toEqualTypeOf<{
   name: string;
@@ -78,9 +93,27 @@ expectTypeOf<SecureOutput>().toEqualTypeOf<{
   email: string;
 }>();
 
+expectTypeOf<CursorListInput["sort"]>().toEqualTypeOf<
+  readonly {
+    column: "id" | "name";
+    direction?: "asc" | "desc";
+  }[] | undefined
+>();
+
+expectTypeOf<CursorListInput["pagination"]>().toEqualTypeOf<
+  | {
+      page?: number;
+      limit?: number;
+      cursor?: number;
+    }
+  | undefined
+>();
+
 const shield = createShield({
   db: {} as never,
   resources: { users: usersResource },
 });
+
+expectTypeOf(shield.routers.users).toMatchTypeOf(shield.router.users);
 
 void shield;

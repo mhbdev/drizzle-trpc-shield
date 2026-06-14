@@ -17,6 +17,7 @@ import {
   createResourceRouter,
   createRootRouter,
   createTRPCFactory,
+  type ResourceRouter,
   type RootRouter,
   type TRPCFactory,
 } from "../trpc/router-factory.js";
@@ -36,7 +37,9 @@ export type ShieldConfig<TContext extends object, TResources extends Record<stri
 
 export type CreateShieldResult<TResources extends Record<string, AnyResource>> = {
   router: RootRouter<TResources>;
-  routers: Record<keyof TResources, unknown>;
+  routers: {
+    [TName in keyof TResources]: ResourceRouter<TResources[TName]>;
+  };
   contract: ShieldRouterContract<TResources>;
   resources: TResources;
   trpc: TRPCFactory;
@@ -49,17 +52,17 @@ export type DbRouterConfig<TContext extends object, TResources extends Record<st
   tables: TResources;
 };
 
-export type CreateShieldRouterConfig<TContext extends object, TResources extends Record<string, unknown>> = {
+export type CreateShieldRouterConfig<TContext extends object, TResources extends Record<string, { table: AnyTable }>> = {
   db: unknown;
   t?: TRPCFactory;
   trpc?: TRPCFactory;
   config: {
-    resources: TResources;
-    globalGuards?: readonly PolicyRule<TContext, AnyTable>[];
-    policy?: ResourcePolicy<TContext, AnyTable>;
-    validation?: ValidationAdapter;
-    plugins?: readonly ShieldPlugin<TContext>[];
-    security?: {
+      resources: TResources;
+      globalGuards?: readonly PolicyRule<TContext, AnyTable>[];
+      policy?: ResourcePolicy<TContext, AnyTable>;
+      validation?: ValidationAdapter;
+      plugins?: readonly ShieldPlugin<TContext>[];
+      security?: {
       requirePolicies?: boolean;
     };
   };
@@ -68,10 +71,10 @@ export type CreateShieldRouterConfig<TContext extends object, TResources extends
 type NormalizedResource<TContext extends object, TEntry> = TEntry extends AnyResource
   ? TEntry
   : TEntry extends { table: infer TTable extends AnyTable }
-    ? ResourceDefinition<TTable, ResourceRuntimeOptions<TContext, TTable>>
+    ? ResourceDefinition<TTable, Omit<TEntry, "table"> & ResourceRuntimeOptions<TContext, TTable>>
     : never;
 
-type NormalizedResources<TContext extends object, TResources extends Record<string, unknown>> = {
+type NormalizedResources<TContext extends object, TResources extends Record<string, { table: AnyTable }>> = {
   [TName in keyof TResources]: NormalizedResource<TContext, TResources[TName]>;
 };
 
@@ -129,7 +132,7 @@ function mergeGlobalPolicy<TContext extends object>(
   };
 }
 
-function normalizeResources<TContext extends object, TResources extends Record<string, unknown>>(
+function normalizeResources<TContext extends object, TResources extends Record<string, { table: AnyTable }>>(
   resources: TResources,
 ): NormalizedResources<TContext, TResources> {
   const normalized = {} as NormalizedResources<TContext, TResources>;
@@ -190,7 +193,7 @@ export function createShield<TContext extends object = Record<string, never>, co
 
   const t = createTRPCFactory(config);
   const validation = config.validation ?? createZodValidationAdapter();
-  const routers = {} as Record<keyof TResources, unknown>;
+  const routers = {} as CreateShieldResult<TResources>["routers"];
 
   for (const [key, definition] of Object.entries(config.resources)) {
     const resourceName = getResourceName(key, definition);
@@ -205,7 +208,7 @@ export function createShield<TContext extends object = Record<string, never>, co
       resource: definition,
       resourceName,
       validation,
-    });
+    }) as ResourceRouter<TResources[typeof key]>;
   }
 
   return {
@@ -231,7 +234,7 @@ export function createDbRouter<TContext extends object, const TResources extends
   }).router;
 }
 
-export function createShieldRouter<TContext extends object, const TResources extends Record<string, unknown>>(
+export function createShieldRouter<TContext extends object, const TResources extends Record<string, { table: AnyTable }>>(
   args: CreateShieldRouterConfig<TContext, TResources>,
 ): RootRouter<NormalizedResources<TContext, TResources>> {
   const t = args.t ?? args.trpc;
